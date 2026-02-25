@@ -1,31 +1,28 @@
 """
-StateGraph definition for the Automaton Auditor (Interim Submission).
+Full StateGraph — Automaton Auditor (Final Submission).
 
 Architecture:
-    START
-      |
-      v
-  [context_builder]
-      |
-     / \
-    /   \
-[repo_investigator] [doc_analyst]   <- parallel fan-out
-    \   /
-     \ /
-      v
-  [evidence_aggregator]
-      |
-      v (conditional edge: check for clone/pdf errors)
-  [handle_error] OR continues
-      |
-      v
-     END
-
-Judges and ChiefJustice will be wired in the final submission.
+    START → context_builder
+              ├→ repo_investigator ─┐
+              └→ doc_analyst        ├→ evidence_aggregator
+                                   │        │
+                              (conditional edge)
+                                   │        │
+                              ┌────┘        └────────────────────┐
+                              ▼                                   ▼
+                         handle_error              ┌─ prosecutor  │
+                              │                    ├─ defense     │ (parallel)
+                              │                    └─ techlead    │
+                              │                         └─────────┤
+                              │                                   ▼
+                              │                          chief_justice
+                              │                                   │
+                              └───────────────────────────────────┘
+                                                                  ▼
+                                                                 END
 """
 
 import json
-import os
 from pathlib import Path
 from typing import Any, Dict, Literal
 
@@ -36,163 +33,135 @@ from src.nodes.detectives import (
     evidence_aggregator_node,
     repo_investigator_node,
 )
+from src.nodes.judges import defense_node, prosecutor_node, techlead_node
+from src.nodes.justice import chief_justice_node
 from src.state import AgentState
-
-# ---------------------------------------------------------------------------
-# Rubric Loader
-# ---------------------------------------------------------------------------
 
 _RUBRIC_PATH = Path(__file__).parent.parent / "rubric.json"
 
 
 def load_rubric() -> list:
-    """Load rubric dimensions from rubric.json."""
     if not _RUBRIC_PATH.exists():
         raise FileNotFoundError(f"rubric.json not found at {_RUBRIC_PATH}")
     with open(_RUBRIC_PATH) as f:
-        data = json.load(f)
-    return data["dimensions"]
+        return json.load(f)["dimensions"]
 
-
-# ---------------------------------------------------------------------------
-# Context Builder Node
-# ---------------------------------------------------------------------------
 
 def context_builder_node(state: AgentState) -> Dict:
-    """Loads the rubric and initialises state before Detectives run."""
     dimensions = load_rubric()
     print(f"[ContextBuilder] Loaded {len(dimensions)} rubric dimensions")
-    return {
-        "rubric_dimensions": dimensions,
-        "evidences": {},
-        "opinions": [],
-        "final_report": None,
-    }
+    return {"rubric_dimensions": dimensions, "evidences": {}, "opinions": [], "final_report": None}
 
-
-# ---------------------------------------------------------------------------
-# Error Handler Node
-# ---------------------------------------------------------------------------
 
 def handle_error_node(state: AgentState) -> Dict:
-    """
-    Invoked when a critical detective failure is detected (e.g. clone failed,
-    PDF not found). Logs the error and terminates gracefully rather than
-    crashing the graph.
-    """
     evidences = state.get("evidences", {})
-    errors = []
     for dim_id, ev_list in evidences.items():
         for ev in ev_list:
-            if not ev.found and ev.location in ("parse_error", "llm_error"):
-                errors.append(f"{dim_id}: {ev.rationale}")
-
-    print(f"[ErrorHandler] Critical failures detected:\n" + "\n".join(errors))
+            if ev.confidence == 0.0:
+                print(f"[ErrorHandler] {dim_id}: {ev.rationale}")
     return {}
 
 
-# ---------------------------------------------------------------------------
-# Conditional Edge: route after aggregation
-# ---------------------------------------------------------------------------
-
-def route_after_aggregation(
-    state: AgentState,
-) -> Literal["handle_error", "__end__"]:
+def route_after_aggregation(state: AgentState) -> Literal["handle_error", "judges"]:
     """
-    Conditional edge function. Inspects the aggregated evidence for
-    critical failures (clone error, PDF parse error) and routes to the
-    error handler if found — otherwise proceeds to END (or Judges in
-    the final submission).
-
-    This prevents the Judicial layer from running on empty/corrupt evidence.
+    Conditional edge: inspects evidence health after detectives complete.
+    Routes to 'judges' (a pass-through node that fans out to all 3 judges)
+    or 'handle_error' if critical failures are detected.
     """
     evidences = state.get("evidences", {})
 
-    # Check for hard clone failure
-    if "clone_failure" in evidences:
-        print("[Router] Clone failure detected — routing to error handler")
+    if "clone_failure" in evidences or "pdf_failure" in evidences:
+        print("[Router] Critical failure detected → handle_error")
         return "handle_error"
 
-    if "pdf_failure" in evidences:
-        print("[Router] PDF failure detected — routing to error handler")
+    low_confidence = sum(
+        1 for ev_list in evidences.values()
+        for ev in ev_list if ev.confidence == 0.0
+    )
+    if low_confidence >= 3:
+        print(f"[Router] {low_confidence} zero-confidence results → handle_error")
         return "handle_error"
 
-    # Check if too many detectives returned zero-confidence evidence
-    low_confidence_count = 0
-    for ev_list in evidences.values():
-        for ev in ev_list:
-            if ev.confidence == 0.0:
-                low_confidence_count += 1
-
-    if low_confidence_count >= 3:
-        print(f"[Router] {low_confidence_count} zero-confidence findings — routing to error handler")
-        return "handle_error"
-
-    print("[Router] Evidence looks good — proceeding")
-    return "__end__"
+    print("[Router] Evidence healthy → proceeding to judicial layer")
+    return "judges"
 
 
-# ---------------------------------------------------------------------------
-# Graph Builder
-# ---------------------------------------------------------------------------
+def judicial_fanout_node(state: AgentState) -> Dict:
+    """
+    Pass-through synchronisation node. Acts as the single fan-out trigger
+    for all three parallel judges. Receives the healthy evidence signal
+    from the conditional edge and immediately fans out to prosecutor,
+    defense, and techlead simultaneously.
+    """
+    evidences = state.get("evidences", {})
+    print(f"[JudicialFanout] Triggering 3 parallel judges on "
+          f"{len(evidences)} evidence items")
+    return {}
+
 
 def build_graph() -> StateGraph:
     """
-    Construct and compile the LangGraph StateGraph.
-
-    Fan-out  : context_builder -> repo_investigator AND doc_analyst (parallel)
-    Fan-in   : both detectives -> evidence_aggregator
-    Conditional edge: evidence_aggregator -> handle_error OR END
+    Complete StateGraph with two fan-out/fan-in pairs:
+      1. Detectives:  context_builder → [repo_investigator ‖ doc_analyst] → evidence_aggregator
+      2. Judges:      judicial_fanout → [prosecutor ‖ defense ‖ techlead] → chief_justice
+    Plus a conditional error-routing edge after evidence_aggregator.
     """
     builder = StateGraph(AgentState)
 
-    # --- Register nodes ---
-    builder.add_node("context_builder", context_builder_node)
-    builder.add_node("repo_investigator", repo_investigator_node)
-    builder.add_node("doc_analyst", doc_analyst_node)
+    # ── Register all nodes ──────────────────────────────────────────────────
+    builder.add_node("context_builder",     context_builder_node)
+    builder.add_node("repo_investigator",   repo_investigator_node)
+    builder.add_node("doc_analyst",         doc_analyst_node)
     builder.add_node("evidence_aggregator", evidence_aggregator_node)
-    builder.add_node("handle_error", handle_error_node)
+    builder.add_node("handle_error",        handle_error_node)
+    builder.add_node("judges",              judicial_fanout_node)
+    builder.add_node("prosecutor",          prosecutor_node)
+    builder.add_node("defense",             defense_node)
+    builder.add_node("techlead",            techlead_node)
+    builder.add_node("chief_justice",       chief_justice_node)
 
-    # --- Wire edges ---
-
-    # Entry point
+    # ── Entry ────────────────────────────────────────────────────────────────
     builder.add_edge(START, "context_builder")
 
-    # Fan-out: both detectives run in parallel
+    # ── Detective Fan-Out ────────────────────────────────────────────────────
     builder.add_edge("context_builder", "repo_investigator")
     builder.add_edge("context_builder", "doc_analyst")
 
-    # Fan-in: both detectives must complete before aggregation
+    # ── Detective Fan-In ─────────────────────────────────────────────────────
     builder.add_edge("repo_investigator", "evidence_aggregator")
-    builder.add_edge("doc_analyst", "evidence_aggregator")
+    builder.add_edge("doc_analyst",       "evidence_aggregator")
 
-    # Conditional edge: route based on evidence health
+    # ── Conditional Edge: healthy → judges, broken → error ───────────────────
     builder.add_conditional_edges(
         "evidence_aggregator",
         route_after_aggregation,
         {
             "handle_error": "handle_error",
-            "__end__": END,
+            "judges":       "judges",
         },
     )
 
-    # Error handler always terminates
+    # ── Error path terminates ────────────────────────────────────────────────
     builder.add_edge("handle_error", END)
+
+    # ── Judicial Fan-Out (3-way parallel) ────────────────────────────────────
+    builder.add_edge("judges", "prosecutor")
+    builder.add_edge("judges", "defense")
+    builder.add_edge("judges", "techlead")
+
+    # ── Judicial Fan-In ──────────────────────────────────────────────────────
+    builder.add_edge("prosecutor", "chief_justice")
+    builder.add_edge("defense",    "chief_justice")
+    builder.add_edge("techlead",   "chief_justice")
+
+    # ── Final output ─────────────────────────────────────────────────────────
+    builder.add_edge("chief_justice", END)
 
     return builder.compile()
 
 
-# ---------------------------------------------------------------------------
-# Entry Point
-# ---------------------------------------------------------------------------
-
-def run_detective_swarm(repo_url: str, pdf_path: str) -> Dict[str, Any]:
-    """
-    Run the detective layer against a repository URL and PDF report.
-    Returns the final AgentState after evidence aggregation.
-    """
+def run_auditor(repo_url: str, pdf_path: str) -> Dict[str, Any]:
     graph = build_graph()
-
     initial_state: AgentState = {
         "repo_url": repo_url,
         "pdf_path": pdf_path,
@@ -201,30 +170,20 @@ def run_detective_swarm(repo_url: str, pdf_path: str) -> Dict[str, Any]:
         "opinions": [],
         "final_report": None,
     }
-
     print(f"\n{'='*60}")
-    print(f"AUTOMATON AUDITOR — Detective Swarm")
+    print(f"AUTOMATON AUDITOR — Full Swarm")
     print(f"Target Repo : {repo_url}")
     print(f"PDF Report  : {pdf_path}")
     print(f"{'='*60}\n")
-
-    final_state = graph.invoke(initial_state)
-    return final_state
+    return graph.invoke(initial_state)
 
 
 if __name__ == "__main__":
     import sys
-
     if len(sys.argv) < 3:
         print("Usage: python -m src.graph <repo_url> <pdf_path>")
         sys.exit(1)
-
-    result = run_detective_swarm(sys.argv[1], sys.argv[2])
-
-    print("\n--- EVIDENCE COLLECTED ---")
-    for dim_id, ev_list in result.get("evidences", {}).items():
-        for ev in ev_list:
-            status = "✅" if ev.found else "❌"
-            print(f"  {status} [{dim_id}] {ev.goal} (confidence: {ev.confidence:.2f})")
-            print(f"     Location : {ev.location}")
-            print(f"     Rationale: {ev.rationale[:120]}")
+    result = run_auditor(sys.argv[1], sys.argv[2])
+    report = result.get("final_report")
+    if report:
+        print(f"\nOverall Score: {report.overall_score}/5")
