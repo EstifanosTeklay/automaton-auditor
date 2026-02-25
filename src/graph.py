@@ -1,30 +1,33 @@
 """
 StateGraph definition for the Automaton Auditor (Interim Submission).
 
-Architecture for the interim:
+Architecture:
     START
       |
       v
-  [context_builder]          <- loads rubric.json into state
+  [context_builder]
       |
-     / \\
-    /   \\
-[repo_investigator] [doc_analyst]   <- parallel fan-out (Detectives)
-    \\   /
-     \\ /
+     / \
+    /   \
+[repo_investigator] [doc_analyst]   <- parallel fan-out
+    \   /
+     \ /
       v
-  [evidence_aggregator]      <- fan-in synchronisation
+  [evidence_aggregator]
+      |
+      v (conditional edge: check for clone/pdf errors)
+  [handle_error] OR continues
       |
       v
      END
 
-Judges and ChiefJustice are NOT wired yet (final submission).
+Judges and ChiefJustice will be wired in the final submission.
 """
 
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Literal
 
 from langgraph.graph import END, START, StateGraph
 
@@ -56,10 +59,7 @@ def load_rubric() -> list:
 # ---------------------------------------------------------------------------
 
 def context_builder_node(state: AgentState) -> Dict:
-    """
-    Loads the rubric and injects it into state before the Detectives run.
-    This is the entry point of the graph.
-    """
+    """Loads the rubric and initialises state before Detectives run."""
     dimensions = load_rubric()
     print(f"[ContextBuilder] Loaded {len(dimensions)} rubric dimensions")
     return {
@@ -71,6 +71,68 @@ def context_builder_node(state: AgentState) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# Error Handler Node
+# ---------------------------------------------------------------------------
+
+def handle_error_node(state: AgentState) -> Dict:
+    """
+    Invoked when a critical detective failure is detected (e.g. clone failed,
+    PDF not found). Logs the error and terminates gracefully rather than
+    crashing the graph.
+    """
+    evidences = state.get("evidences", {})
+    errors = []
+    for dim_id, ev_list in evidences.items():
+        for ev in ev_list:
+            if not ev.found and ev.location in ("parse_error", "llm_error"):
+                errors.append(f"{dim_id}: {ev.rationale}")
+
+    print(f"[ErrorHandler] Critical failures detected:\n" + "\n".join(errors))
+    return {}
+
+
+# ---------------------------------------------------------------------------
+# Conditional Edge: route after aggregation
+# ---------------------------------------------------------------------------
+
+def route_after_aggregation(
+    state: AgentState,
+) -> Literal["handle_error", "__end__"]:
+    """
+    Conditional edge function. Inspects the aggregated evidence for
+    critical failures (clone error, PDF parse error) and routes to the
+    error handler if found — otherwise proceeds to END (or Judges in
+    the final submission).
+
+    This prevents the Judicial layer from running on empty/corrupt evidence.
+    """
+    evidences = state.get("evidences", {})
+
+    # Check for hard clone failure
+    if "clone_failure" in evidences:
+        print("[Router] Clone failure detected — routing to error handler")
+        return "handle_error"
+
+    if "pdf_failure" in evidences:
+        print("[Router] PDF failure detected — routing to error handler")
+        return "handle_error"
+
+    # Check if too many detectives returned zero-confidence evidence
+    low_confidence_count = 0
+    for ev_list in evidences.values():
+        for ev in ev_list:
+            if ev.confidence == 0.0:
+                low_confidence_count += 1
+
+    if low_confidence_count >= 3:
+        print(f"[Router] {low_confidence_count} zero-confidence findings — routing to error handler")
+        return "handle_error"
+
+    print("[Router] Evidence looks good — proceeding")
+    return "__end__"
+
+
+# ---------------------------------------------------------------------------
 # Graph Builder
 # ---------------------------------------------------------------------------
 
@@ -78,8 +140,9 @@ def build_graph() -> StateGraph:
     """
     Construct and compile the LangGraph StateGraph.
 
-    Fan-out: context_builder -> repo_investigator AND doc_analyst (parallel)
-    Fan-in:  both detectives -> evidence_aggregator
+    Fan-out  : context_builder -> repo_investigator AND doc_analyst (parallel)
+    Fan-in   : both detectives -> evidence_aggregator
+    Conditional edge: evidence_aggregator -> handle_error OR END
     """
     builder = StateGraph(AgentState)
 
@@ -88,13 +151,14 @@ def build_graph() -> StateGraph:
     builder.add_node("repo_investigator", repo_investigator_node)
     builder.add_node("doc_analyst", doc_analyst_node)
     builder.add_node("evidence_aggregator", evidence_aggregator_node)
+    builder.add_node("handle_error", handle_error_node)
 
     # --- Wire edges ---
 
     # Entry point
     builder.add_edge(START, "context_builder")
 
-    # Fan-out: both detectives run in parallel after context is built
+    # Fan-out: both detectives run in parallel
     builder.add_edge("context_builder", "repo_investigator")
     builder.add_edge("context_builder", "doc_analyst")
 
@@ -102,8 +166,18 @@ def build_graph() -> StateGraph:
     builder.add_edge("repo_investigator", "evidence_aggregator")
     builder.add_edge("doc_analyst", "evidence_aggregator")
 
-    # End (Judges will be inserted here in the final submission)
-    builder.add_edge("evidence_aggregator", END)
+    # Conditional edge: route based on evidence health
+    builder.add_conditional_edges(
+        "evidence_aggregator",
+        route_after_aggregation,
+        {
+            "handle_error": "handle_error",
+            "__end__": END,
+        },
+    )
+
+    # Error handler always terminates
+    builder.add_edge("handle_error", END)
 
     return builder.compile()
 
@@ -153,4 +227,4 @@ if __name__ == "__main__":
             status = "✅" if ev.found else "❌"
             print(f"  {status} [{dim_id}] {ev.goal} (confidence: {ev.confidence:.2f})")
             print(f"     Location : {ev.location}")
-            print(f"     Rationale: {ev.rationale[:120]}...")
+            print(f"     Rationale: {ev.rationale[:120]}")
