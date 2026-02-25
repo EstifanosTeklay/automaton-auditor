@@ -175,3 +175,22 @@ Traces will appear at [smith.langchain.com](https://smith.langchain.com).
 - Full graph wiring: Detectives → Judges → ChiefJustice
 - Markdown audit report output
 - Audit reports on self and peer repositories
+
+---
+
+## Dependency Management with uv (Reproducible Installs)
+
+This project uses `uv` with a committed `uv.lock` file for fully reproducible installs. Every dependency is pinned to an exact version with a hash — meaning `uv sync` gives every developer and CI environment the identical package versions.
+
+```bash
+# Install exact locked versions (recommended — fully reproducible)
+uv sync
+
+# Update lockfile after changing pyproject.toml
+uv lock
+
+# Add a new dependency and update lockfile atomically
+uv add some-package
+```
+
+Why this matters: `pip install -r requirements.txt` with `>=` version constraints can silently install different versions on different machines, causing subtle bugs. The `uv.lock` file eliminates this entirely.
