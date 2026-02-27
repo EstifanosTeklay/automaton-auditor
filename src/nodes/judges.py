@@ -9,6 +9,7 @@ Pydantic validation, no freeform text parsing.
 """
 
 import os
+import json
 from typing import Dict, List
 
 from langchain_anthropic import ChatAnthropic
@@ -98,6 +99,17 @@ def _invoke_with_retry(llm, messages, judge_name: str, criterion_id: str) -> Jud
                 cited_evidence=["llm_error"],
             )
 
+
+    # Guidance to ensure judges map numerical scores to rubric semantics
+    SCORE_GUIDANCE = (
+        "Score mapping guidance:\n"
+        "1 = Fails the criterion (critical issues present).\n"
+        "2 = Partially fails (significant gaps).\n"
+        "3 = Meets minimum expectations (some debt).\n"
+        "4 = Good (minor issues only).\n"
+        "5 = Excellent (meets or exceeds the success pattern)."
+    )
+
 # ---------------------------------------------------------------------------
 # Helper: format evidence for a dimension
 # ---------------------------------------------------------------------------
@@ -133,13 +145,23 @@ def prosecutor_node(state: AgentState) -> Dict:
         dim_id = dim["id"]
         evidence_text = _format_evidence(evidences, dim_id)
 
+        # Provide the full rubric dimension to the judge for rubric-aware scoring
+        dim_payload = json.dumps({
+            "id": dim_id,
+            "name": dim.get("name"),
+            "target_artifact": dim.get("target_artifact"),
+            "forensic_instruction": dim.get("forensic_instruction"),
+            "success_pattern": dim.get("success_pattern"),
+            "failure_pattern": dim.get("failure_pattern"),
+        }, indent=2)
+
         user_msg = (
             f"Dimension: {dim['name']} (id: {dim_id})\n"
-            f"Judicial Logic: {dim.get('forensic_instruction', '')}\n\n"
+            f"Rubric Dimension (JSON):\n{dim_payload}\n\n"
             f"Evidence collected by Detectives:\n{evidence_text}\n\n"
-            f"Success pattern: {dim.get('success_pattern', '')}\n"
-            f"Failure pattern: {dim.get('failure_pattern', '')}\n\n"
-            "As the Prosecutor, render your harshest honest verdict. "
+            f"Use the following explicit score guidance when assigning a 1-5 score:\n{SCORE_GUIDANCE}\n\n"
+            "As the Prosecutor, render your harshest honest verdict matching the rubric and evidence. "
+            "Explicitly reference which parts of the 'success_pattern' or 'failure_pattern' informed your score. "
             "Your criterion_id must be exactly: " + dim_id
         )
 
@@ -164,13 +186,22 @@ def defense_node(state: AgentState) -> Dict:
         dim_id = dim["id"]
         evidence_text = _format_evidence(evidences, dim_id)
 
+        dim_payload = json.dumps({
+            "id": dim_id,
+            "name": dim.get("name"),
+            "target_artifact": dim.get("target_artifact"),
+            "forensic_instruction": dim.get("forensic_instruction"),
+            "success_pattern": dim.get("success_pattern"),
+            "failure_pattern": dim.get("failure_pattern"),
+        }, indent=2)
+
         user_msg = (
             f"Dimension: {dim['name']} (id: {dim_id})\n"
-            f"Judicial Logic: {dim.get('forensic_instruction', '')}\n\n"
+            f"Rubric Dimension (JSON):\n{dim_payload}\n\n"
             f"Evidence collected by Detectives:\n{evidence_text}\n\n"
-            f"Success pattern: {dim.get('success_pattern', '')}\n"
-            f"Failure pattern: {dim.get('failure_pattern', '')}\n\n"
-            "As the Defense Attorney, find the most generous honest interpretation. "
+            f"Use the following explicit score guidance when assigning a 1-5 score:\n{SCORE_GUIDANCE}\n\n"
+            "As the Defense Attorney, give the most generous honest interpretation that still maps to the rubric. "
+            "Cite which success_pattern elements are plausibly satisfied and why. "
             "Your criterion_id must be exactly: " + dim_id
         )
 
@@ -195,14 +226,22 @@ def techlead_node(state: AgentState) -> Dict:
         dim_id = dim["id"]
         evidence_text = _format_evidence(evidences, dim_id)
 
+        dim_payload = json.dumps({
+            "id": dim_id,
+            "name": dim.get("name"),
+            "target_artifact": dim.get("target_artifact"),
+            "forensic_instruction": dim.get("forensic_instruction"),
+            "success_pattern": dim.get("success_pattern"),
+            "failure_pattern": dim.get("failure_pattern"),
+        }, indent=2)
+
         user_msg = (
             f"Dimension: {dim['name']} (id: {dim_id})\n"
-            f"Judicial Logic: {dim.get('forensic_instruction', '')}\n\n"
+            f"Rubric Dimension (JSON):\n{dim_payload}\n\n"
             f"Evidence collected by Detectives:\n{evidence_text}\n\n"
-            f"Success pattern: {dim.get('success_pattern', '')}\n"
-            f"Failure pattern: {dim.get('failure_pattern', '')}\n\n"
-            "As the Tech Lead, give a pragmatic assessment focused on whether "
-            "this actually works and is maintainable in production. "
+            f"Use the following explicit score guidance when assigning a 1-5 score:\n{SCORE_GUIDANCE}\n\n"
+            "As the Tech Lead, give a pragmatic assessment mapping technical findings to the rubric. "
+            "When recommending remediation, include file-level pointers matching cited evidence. "
             "Your criterion_id must be exactly: " + dim_id
         )
 
