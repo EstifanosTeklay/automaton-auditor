@@ -5,7 +5,7 @@ handle parallel agent execution without data overwriting.
 """
 
 import operator
-from typing import Annotated, Dict, List, Literal, Optional
+from typing import Annotated, Dict, List, Literal, Optional, Any
 
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
@@ -33,6 +33,18 @@ class Evidence(BaseModel):
     confidence: float = Field(
         ge=0.0, le=1.0,
         description="Confidence score between 0.0 and 1.0"
+    )
+    artifact_type: Optional[str] = Field(
+        default=None,
+        description="Type of artifact (e.g., 'github_repo', 'pdf_text', 'pdf_image')"
+    )
+    evidence_id: Optional[str] = Field(
+        default=None,
+        description="Unique identifier for this evidence item (for cross-referencing)"
+    )
+    metadata: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Free-form metadata dict with parser-specific details"
     )
 
 

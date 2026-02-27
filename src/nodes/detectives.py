@@ -136,6 +136,12 @@ def repo_investigator_node(state: AgentState) -> Dict:
         )
 
         evidence = _get_evidence(REPO_SYSTEM_PROMPT, user_msg)
+        # Enrich evidence with richer typing metadata for downstream consumers
+        evidence = evidence.copy(update={
+            "artifact_type": "github_repo",
+            "evidence_id": f"{dim_id}_repo",
+            "metadata": {"commit_count": summary.get("commit_count", 0), "files_sample": summary.get("files", [])[:5]},
+        })
         evidences[dim_id] = [evidence]
 
     print(f"[RepoInvestigator] Generated evidence for {len(evidences)} dimensions")
@@ -217,6 +223,12 @@ def doc_analyst_node(state: AgentState) -> Dict:
         )
 
         evidence = _get_evidence(DOC_SYSTEM_PROMPT, user_msg)
+        # Enrich evidence with explicit typing and metadata
+        evidence = evidence.copy(update={
+            "artifact_type": "pdf_text",
+            "evidence_id": f"{dim_id}_pdf",
+            "metadata": {"file_paths_mentioned": file_paths_mentioned[:5], "concept_depth": summary.get("concept_depth", {})},
+        })
         evidences[dim_id] = [evidence]
 
     print(f"[DocAnalyst] Generated evidence for {len(evidences)} dimensions")
@@ -296,6 +308,9 @@ def vision_inspector_node(state: AgentState) -> Dict:
                     location=image_paths[0],
                     rationale=f"Extracted {len(image_paths)} images from PDF; OCR {'available' if ocr_text else 'not available'}.",
                     confidence=0.85 if ocr_text else 0.6,
+                    artifact_type="pdf_image",
+                    evidence_id=f"{dim_id}_images",
+                    metadata={"images": image_paths, "ocr_available": bool(ocr_text)},
                 )
             else:
                 evidence = Evidence(
@@ -305,6 +320,9 @@ def vision_inspector_node(state: AgentState) -> Dict:
                     location=pdf_path,
                     rationale="No images found in PDF.",
                     confidence=0.0,
+                    artifact_type="pdf_image",
+                    evidence_id=f"{dim_id}_images",
+                    metadata=None,
                 )
 
             evidences[dim_id] = [evidence]

@@ -32,6 +32,7 @@ from src.nodes.detectives import (
     doc_analyst_node,
     evidence_aggregator_node,
     repo_investigator_node,
+    vision_inspector_node,
 )
 from src.nodes.judges import defense_node, prosecutor_node, techlead_node
 from src.nodes.justice import chief_justice_node
@@ -103,6 +104,7 @@ def build_graph() -> StateGraph:
     builder.add_node("context_builder",     context_builder_node)
     builder.add_node("repo_investigator",   repo_investigator_node)
     builder.add_node("doc_analyst",         doc_analyst_node)
+    builder.add_node("vision_inspector",    vision_inspector_node)
     builder.add_node("evidence_aggregator", evidence_aggregator_node)
     builder.add_node("handle_error",        handle_error_node)
     builder.add_node("judges",              judicial_fanout_node)
@@ -117,10 +119,12 @@ def build_graph() -> StateGraph:
     # Detective Fan-Out
     builder.add_edge("context_builder", "repo_investigator")
     builder.add_edge("context_builder", "doc_analyst")
+    builder.add_edge("context_builder", "vision_inspector")
 
     # Detective Fan-In
     builder.add_edge("repo_investigator", "evidence_aggregator")
     builder.add_edge("doc_analyst",       "evidence_aggregator")
+    builder.add_edge("vision_inspector",  "evidence_aggregator")
 
     # Conditional Edge: clone failure → error, everything else → judges
     builder.add_conditional_edges(
