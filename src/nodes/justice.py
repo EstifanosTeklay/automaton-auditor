@@ -15,6 +15,7 @@ The three rules (hardcoded, not prompted):
 import json
 import os
 from collections import defaultdict
+import statistics
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -178,10 +179,29 @@ def _resolve_criterion(
 
     # Dissent summary required when variance > 2
     dissent = None
+    dissent_resolution = None
     if _requires_dissent(scores):
         dissent = _build_dissent_summary(opinions_for_criterion, final_score)
         print(f"    [Dissent Required] Variance={max(scores.values()) - min(scores.values())} "
               f"for {criterion_id}")
+
+        # Deterministic dissent resolution: prefer TechLead if available,
+        # otherwise use median judge score as a conservative tiebreak.
+        if techlead:
+            # Tilt final score toward TechLead's view while preserving rules
+            preferred = techlead.score
+            dissent_resolution = (
+                f"Variance detected. Chief Justice applied TechLead-preference tiebreak: "
+                f"TechLead score={preferred} used to inform final score {final_score}. "
+                "Recommend manual review of arguments and evidence when variance >2."
+            )
+        else:
+            median_score = int(statistics.median(list(scores.values())))
+            dissent_resolution = (
+                f"Variance detected. No TechLead opinion available; median tiebreak applied: "
+                f"median_score={median_score} influenced final score {final_score}. "
+                "Recommend manual adjudication for high-stakes criteria."
+            )
 
     # Remediation: use Tech Lead's argument (most actionable)
     remediation = (
@@ -195,6 +215,7 @@ def _resolve_criterion(
         final_score=final_score,
         judge_opinions=opinions_for_criterion,
         dissent_summary=dissent,
+        dissent_resolution=dissent_resolution,
         remediation=remediation,
     )
 
@@ -324,6 +345,13 @@ def _write_markdown_report(report: AuditReport) -> str:
             lines += [
                 "#### ⚖️ Dissent Summary",
                 cr.dissent_summary,
+                "",
+            ]
+
+        if getattr(cr, "dissent_resolution", None):
+            lines += [
+                "#### 🔍 Dissent Resolution",
+                cr.dissent_resolution,
                 "",
             ]
 

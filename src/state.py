@@ -77,6 +77,10 @@ class CriterionResult(BaseModel):
         default=None,
         description="Required when score variance across judges exceeds 2"
     )
+    dissent_resolution: Optional[str] = Field(
+        default=None,
+        description="Deterministic resolution describing how the Chief Justice resolved judge variance"
+    )
     remediation: str = Field(
         description="Specific, file-level instructions for improvement"
     )

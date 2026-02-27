@@ -10,6 +10,7 @@ Evidence Pydantic schema — ensuring structured output, not freeform text.
 
 import json
 import os
+import tempfile
 from typing import Any, Dict, List
 
 from langchain_anthropic import ChatAnthropic
@@ -225,6 +226,96 @@ def doc_analyst_node(state: AgentState) -> Dict:
 # ---------------------------------------------------------------------------
 # Evidence Aggregator Node (Fan-In synchronisation point)
 # ---------------------------------------------------------------------------
+
+
+def vision_inspector_node(state: AgentState) -> Dict:
+    """
+    VisionInspector: extracts images from a PDF and performs lightweight
+    forensic checks. Produces Evidence objects for rubric dimensions that
+    target PDF images (e.g., `pdf_images` or `pdf_images_ocr`). This node
+    avoids heavy external dependencies where possible and falls back to
+    a presence-based evidence item if OCR is unavailable.
+    """
+    pdf_path: str = state.get("pdf_path", "")
+    rubric_dimensions: List[Dict] = state.get("rubric_dimensions", [])
+
+    image_targets = [d for d in rubric_dimensions if d.get("target_artifact") in ("pdf_images", "pdf_images_ocr", "pdf_images_visual")]
+    evidences: Dict[str, List[Evidence]] = {}
+
+    if not image_targets:
+        return {"evidences": evidences}
+
+    if not pdf_path or not os.path.exists(pdf_path):
+        for dim in image_targets:
+            evidences[dim["id"]] = [
+                Evidence(
+                    goal=dim.get("name", "PDF Images"),
+                    found=False,
+                    content=None,
+                    location=pdf_path or "pdf_path_missing",
+                    rationale="PDF not found or path missing; could not extract images.",
+                    confidence=0.0,
+                )
+            ]
+        return {"evidences": evidences}
+
+    workdir = tempfile.mkdtemp(prefix="vision_inspect_")
+    image_paths = []
+    try:
+        image_paths = []
+        # Use the doc_tools helper to extract images if available
+        try:
+            from src.tools.doc_tools import extract_images_from_pdf
+
+            image_paths = extract_images_from_pdf(pdf_path, workdir)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[VisionInspector] Image extraction failed: {exc}")
+
+        # Attempt OCR on first image if pytesseract is available
+        ocr_text = None
+        if image_paths:
+            try:
+                from PIL import Image
+                import pytesseract
+
+                ocr_text = pytesseract.image_to_string(Image.open(image_paths[0]))
+            except Exception:
+                ocr_text = None
+
+        for dim in image_targets:
+            dim_id = dim["id"]
+            if image_paths:
+                content = {
+                    "images": image_paths,
+                    "ocr_excerpt": (ocr_text[:200] if ocr_text else None),
+                }
+                evidence = Evidence(
+                    goal=dim.get("name", "PDF Images"),
+                    found=True,
+                    content=json.dumps(content),
+                    location=image_paths[0],
+                    rationale=f"Extracted {len(image_paths)} images from PDF; OCR {'available' if ocr_text else 'not available'}.",
+                    confidence=0.85 if ocr_text else 0.6,
+                )
+            else:
+                evidence = Evidence(
+                    goal=dim.get("name", "PDF Images"),
+                    found=False,
+                    content=None,
+                    location=pdf_path,
+                    rationale="No images found in PDF.",
+                    confidence=0.0,
+                )
+
+            evidences[dim_id] = [evidence]
+
+    finally:
+        # Intentionally keep extracted images on disk for traceability; not deleting workdir
+        pass
+
+    print(f"[VisionInspector] Generated image evidence for {len(evidences)} dimensions")
+    return {"evidences": evidences}
+
 
 def evidence_aggregator_node(state: AgentState) -> Dict:
     """
