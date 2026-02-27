@@ -64,34 +64,25 @@ def handle_error_node(state: AgentState) -> Dict:
 
 def route_after_aggregation(state: AgentState) -> Literal["handle_error", "judges"]:
     """
-    Conditional edge: inspects evidence health after detectives complete.
-    Routes to 'judges' (a pass-through node that fans out to all 3 judges)
-    or 'handle_error' if critical failures are detected.
+    Conditional edge: only hard-fails on a clone error.
+    Missing PDF dimensions are soft failures — judges still run with partial evidence.
     """
     evidences = state.get("evidences", {})
 
-    if "clone_failure" in evidences or "pdf_failure" in evidences:
-        print("[Router] Critical failure detected → handle_error")
+    # Only stop if the repo itself could not be cloned
+    if "clone_failure" in evidences:
+        print("[Router] Clone failure → handle_error")
         return "handle_error"
 
-    low_confidence = sum(
-        1 for ev_list in evidences.values()
-        for ev in ev_list if ev.confidence == 0.0
-    )
-    if low_confidence >= 3:
-        print(f"[Router] {low_confidence} zero-confidence results → handle_error")
-        return "handle_error"
-
-    print("[Router] Evidence healthy → proceeding to judicial layer")
+    # Everything else proceeds to judges
+    total = sum(len(v) for v in evidences.values())
+    print(f"[Router] {total} evidence items collected → proceeding to judges")
     return "judges"
 
 
 def judicial_fanout_node(state: AgentState) -> Dict:
     """
-    Pass-through synchronisation node. Acts as the single fan-out trigger
-    for all three parallel judges. Receives the healthy evidence signal
-    from the conditional edge and immediately fans out to prosecutor,
-    defense, and techlead simultaneously.
+    Pass-through node that triggers the 3 parallel judges simultaneously.
     """
     evidences = state.get("evidences", {})
     print(f"[JudicialFanout] Triggering 3 parallel judges on "
@@ -102,13 +93,13 @@ def judicial_fanout_node(state: AgentState) -> Dict:
 def build_graph() -> StateGraph:
     """
     Complete StateGraph with two fan-out/fan-in pairs:
-      1. Detectives:  context_builder → [repo_investigator ‖ doc_analyst] → evidence_aggregator
-      2. Judges:      judicial_fanout → [prosecutor ‖ defense ‖ techlead] → chief_justice
+      1. Detectives:  context_builder → [repo_investigator || doc_analyst] → evidence_aggregator
+      2. Judges:      judicial_fanout → [prosecutor || defense || techlead] → chief_justice
     Plus a conditional error-routing edge after evidence_aggregator.
     """
     builder = StateGraph(AgentState)
 
-    # ── Register all nodes ──────────────────────────────────────────────────
+    # Register all nodes
     builder.add_node("context_builder",     context_builder_node)
     builder.add_node("repo_investigator",   repo_investigator_node)
     builder.add_node("doc_analyst",         doc_analyst_node)
@@ -120,18 +111,18 @@ def build_graph() -> StateGraph:
     builder.add_node("techlead",            techlead_node)
     builder.add_node("chief_justice",       chief_justice_node)
 
-    # ── Entry ────────────────────────────────────────────────────────────────
+    # Entry
     builder.add_edge(START, "context_builder")
 
-    # ── Detective Fan-Out ────────────────────────────────────────────────────
+    # Detective Fan-Out
     builder.add_edge("context_builder", "repo_investigator")
     builder.add_edge("context_builder", "doc_analyst")
 
-    # ── Detective Fan-In ─────────────────────────────────────────────────────
+    # Detective Fan-In
     builder.add_edge("repo_investigator", "evidence_aggregator")
     builder.add_edge("doc_analyst",       "evidence_aggregator")
 
-    # ── Conditional Edge: healthy → judges, broken → error ───────────────────
+    # Conditional Edge: clone failure → error, everything else → judges
     builder.add_conditional_edges(
         "evidence_aggregator",
         route_after_aggregation,
@@ -141,20 +132,20 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # ── Error path terminates ────────────────────────────────────────────────
+    # Error path terminates
     builder.add_edge("handle_error", END)
 
-    # ── Judicial Fan-Out (3-way parallel) ────────────────────────────────────
+    # Judicial Fan-Out (3-way parallel)
     builder.add_edge("judges", "prosecutor")
     builder.add_edge("judges", "defense")
     builder.add_edge("judges", "techlead")
 
-    # ── Judicial Fan-In ──────────────────────────────────────────────────────
+    # Judicial Fan-In
     builder.add_edge("prosecutor", "chief_justice")
     builder.add_edge("defense",    "chief_justice")
     builder.add_edge("techlead",   "chief_justice")
 
-    # ── Final output ─────────────────────────────────────────────────────────
+    # Final output
     builder.add_edge("chief_justice", END)
 
     return builder.compile()
